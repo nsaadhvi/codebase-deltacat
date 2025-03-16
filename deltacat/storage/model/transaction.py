@@ -457,9 +457,10 @@ class Transaction(dict):
         """
         root_path = PosixPath(root)
         target_path = PosixPath(target)
-        # TODO (martinezdavid): Check why is_absolute() fails for certain Delta paths
-        # if not root_path.is_absolute() or not target_path.is_absolute():
-        #     raise ValueError("Both root and target must be absolute paths.")
+        if (not str(root_path).startswith(".riv-meta")) and (
+            not root_path.is_absolute() or not target_path.is_absolute()
+        ):
+            raise ValueError("Both root and target must be absolute paths.")
         if root_path == target_path:
             raise ValueError(
                 "Target and root are identical, but expected target to be a child of root."

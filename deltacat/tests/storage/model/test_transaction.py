@@ -58,9 +58,13 @@ class TestAbsToRelative:
             Transaction._abs_txn_meta_path_to_relative(catalog_root, absolute_path)
 
     def test_abs_to_relative_empty_path(self):
-        with pytest.raises(ValueError, match="Expected target to be a child of root."):
+        with pytest.raises(
+            ValueError, match="Both root and target must be absolute paths."
+        ):
             Transaction._abs_txn_meta_path_to_relative("", "/lorem/ipsum")
-        with pytest.raises(ValueError, match="Expected target to be a child of root."):
+        with pytest.raises(
+            ValueError, match="Both root and target must be absolute paths."
+        ):
             Transaction._abs_txn_meta_path_to_relative("/lorem/ipsum/", "")
 
     # Test cases for the relativize_operation_paths function
@@ -306,3 +310,13 @@ class TestAbsToRelative:
             assert (
                 transaction_operation.metafile_write_paths == expected_paths
             ), f"Failed for transaction type {txn_type} and operation type {op_type}"
+
+    def test_riv_meta_paths(self):
+        # test for paths which are already relative and begin with .riv-meta-
+        # this is a special case for the rivet storage engine
+        # TODO(martinezdavid): Create end-to-end test for riv-meta- paths to ensure they are handled correctly
+        riv_root = ".riv-meta-/dataset/dir/sets"
+        riv_target = ".riv-meta-/dataset/dir/sets/meta/example/sample_data_0001.mpk"
+        expected_relative_path = "meta/example/sample_data_0001.mpk"
+        relative_path = Transaction._abs_txn_meta_path_to_relative(riv_root, riv_target)
+        assert relative_path == expected_relative_path
