@@ -8,8 +8,10 @@ import uuid
 import posixpath
 from pathlib import PosixPath
 from pathlib import Path
+from pyarrow.fs import FileSelector, FileType
 import threading
 from collections import defaultdict
+from catalog import all_catalogs
 
 from itertools import chain
 from typing import Optional, List, Union, Tuple
@@ -287,6 +289,9 @@ class Transaction(dict):
         txn_type: TransactionType,
         txn_operations: Optional[TransactionOperationList],
     ) -> Transaction:
+        interactive_txn = True
+        if txn_operations:
+            interactive_txn = False
         operation_types = set([op.type for op in txn_operations])
         if txn_type == TransactionType.READ:
             if operation_types - TransactionOperationType.read_operations():
@@ -321,6 +326,7 @@ class Transaction(dict):
         transaction = Transaction()
         transaction.type = txn_type
         transaction.operations = txn_operations
+        transacton.is_interactive = interactive_txn
         return transaction
 
     @staticmethod
@@ -776,7 +782,7 @@ class Transaction(dict):
         )
 
         txn_log_dir = posixpath.join(catalog_root_normalized, TXN_DIR_NAME)
-        running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME)
+        running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, "interactive")
         filesystem.create_dir(running_txn_log_dir, recursive=True)
         failed_txn_log_dir = posixpath.join(txn_log_dir, FAILED_TXN_DIR_NAME)
         filesystem.create_dir(failed_txn_log_dir, recursive=False)
@@ -811,7 +817,7 @@ class Transaction(dict):
             self.list_results.append(list_result)
         else:
             # Handle other operation
-            running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME)
+            running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, "interactive")
             running_txn_log_file_path = posixpath.join(
             running_txn_log_dir,
             self.id,
@@ -852,6 +858,49 @@ class Transaction(dict):
                 # delete the in-progress transaction log file entry
                 filesystem.delete_file(running_txn_log_file_path)
 
+    def pause():
+        """
+        Pause all running transactions by moving them to the paused transaction directory.
+        """
+        catalog_roots = Transaction.find_catalog()
+        if not catalog_roots:
+            print("No catalog roots found.")
+            return
+
+        for catalog_root_dir in catalog_roots:
+            _, filesystem = resolve_path_and_filesystem(catalog_root_dir)
+            catalog_root, filesystem = resolve_path_and_filesystem(
+                catalog_root_dir,
+                filesystem,
+            )
+
+            txn_log_dir = posixpath.join(catalog_root, TXN_DIR_NAME)
+            running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, "interactive")
+            paused_txn_log_dir = posixpath.join(txn_log_dir, PAUSED_TXN_DIR_NAME)
+
+            running_txn_file_selector = FileSelector(running_txn_log_dir, recursive=False)
+            running_txn_info_list = filesystem.get_file_info(running_txn_file_selector)
+
+            for running_txn_info in running_txn_info_list:
+                if running_txn_info.type != FileType.FILE:
+                    continue  # Skip non-files
+
+                filename = posixpath.basename(running_txn_info.path)
+                source_path = running_txn_info.path
+                target_path = posixpath.join(paused_txn_log_dir, filename)
+
+                # Read running transaction file
+                with filesystem.open_input_file(source_path) as src_file:
+                    data = src_file.read()
+
+                # Write to paused directory
+                filesystem.create_dir(paused_txn_log_dir)
+                with filesystem.open_output_stream(target_path) as dst_file:
+                    dst_file.write(data)
+
+                # Delete original running transaction
+                filesystem.delete_file(source_path)
+
     def pause(self, catalog_root_dir: str):
         catalog_root_normalized, filesystem = resolve_path_and_filesystem(
             catalog_root_dir,
@@ -878,8 +927,51 @@ class Transaction(dict):
                 )
         
         filesystem.delete_file(running_txn_log_file_path)
-    
-    def resume(self):
+
+    def resume():
+        """
+        Resume all paused transactions by moving them to the running transaction directory.
+        """
+        catalog_roots = Transaction.find_catalog()
+        if not catalog_roots:
+            print("No catalog roots found.")
+            return
+
+        for catalog_root_dir in catalog_roots:
+            _, filesystem = resolve_path_and_filesystem(catalog_root_dir)
+            catalog_root, filesystem = resolve_path_and_filesystem(
+                catalog_root_dir,
+                filesystem,
+            )
+
+            txn_log_dir = posixpath.join(catalog_root, TXN_DIR_NAME)
+            paused_txn_log_dir = posixpath.join(txn_log_dir, PAUSED_TXN_DIR_NAME)
+            running_txn_log_dir = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, "interactive")
+
+            paused_txn_file_selector = FileSelector(paused_txn_log_dir, recursive=False)
+            paused_txn_info_list = filesystem.get_file_info(paused_txn_file_selector)
+
+            for paused_txn_info in paused_txn_info_list:
+                if paused_txn_info.type != FileType.FILE:
+                    continue  # Skip directories or other non-files
+
+                filename = posixpath.basename(paused_txn_info.path)
+                source_path = paused_txn_info.path
+                target_path = posixpath.join(running_txn_log_dir, filename)
+
+                # Read paused transaction file
+                with filesystem.open_input_file(source_path) as src_file:
+                    data = src_file.read()
+
+                # Write to running directory
+                filesystem.create_dir(running_txn_log_dir)
+                with filesystem.open_output_stream(target_path) as dst_file:
+                    dst_file.write(data)
+
+                # Optionally delete the original paused file
+                filesystem.delete_file(source_path)
+
+    def resume_two(self):
         # config_path is a placeholder for now maybe we can make this a constant?
         catalog_root_dir = self.find_catalog()
 
@@ -909,10 +1001,11 @@ class Transaction(dict):
         
         filesystem.delete_file(paused_txn_log_file_path)
 
-    def find_catalog(self):
+    @staticmethod
+    def find_catalog():
         config_dir = Path("codebase-deltacat/deltacat/catalog/model")
         config_path = config_dir / "catalog_config.json"
-
+ 
         try:
             with open(config_path, 'r') as f:
                 config_data = json.load(f)
@@ -925,29 +1018,6 @@ class Transaction(dict):
 
         # Extract catalog root names (top-level keys in the 'catalogs' section)
         return list(config_data.get("catalogs", {}).keys())
-
-        for catalog_root in catalog_roots:
-            print(f"Searching in catalog root: {catalog_root}")
-            
-            # Resolve the catalog path and filesystem
-            catalog_root_normalized, filesystem = resolve_path_and_filesystem(catalog_root, self.filesystem)
-            
-            # Define the path to the txn/paused directory
-            txn_log_dir = posixpath.join(catalog_root_normalized, TXN_DIR_NAME)
-            paused_txn_log_dir = posixpath.join(txn_log_dir, PAUSED_TXN_DIR_NAME)
-            
-            # Check if the paused transaction directory exists
-            if not os.path.isdir(paused_txn_log_dir):
-                print(f"Warning: Paused transaction directory does not exist in {paused_txn_log_dir}")
-                continue
-            
-            # Check if the paused transaction file exists in the paused directory
-            paused_txn_path = posixpath.join(paused_txn_log_dir, self.id)
-            
-            if os.path.isfile(paused_txn_path):
-                print(f"Paused transaction '{self.id}' found in {paused_txn_log_dir}")
-            else:
-                print(f"Paused transaction '{self.id}' NOT found in {paused_txn_log_dir}")
     
     def commit_all(
         self,
@@ -965,7 +1035,7 @@ class Transaction(dict):
         if self.type == TransactionType.READ:
             return self._list_results
 
-        running_path  = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, self.id)
+        running_path  = posixpath.join(txn_log_dir, RUNNING_TXN_DIR_NAME, "interactive", self.id)
         failed_dir    = posixpath.join(txn_log_dir, FAILED_TXN_DIR_NAME)
         success_dir   = posixpath.join(txn_log_dir, SUCCESS_TXN_DIR_NAME)
 
